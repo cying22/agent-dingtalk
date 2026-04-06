@@ -22,6 +22,7 @@ let isConnected = false;
 let messageCallback: ((msg: { text: string; senderNick: string; sessionWebhook: string }) => void) | null = null;
 let currentSessionWebhook: string | null = null;  // 当前消息的sessionWebhook
 let autoReplyEnabled = true;  // 是否启用自动回复
+let globalCtx: ExtensionContext | null = null;  // 保存ctx供命令处理使用
 
 // 初始化钉钉客户端
 async function initDingTalkClient(api: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
@@ -187,6 +188,9 @@ export default function (pi: ExtensionAPI) {
 
   // 会话开始时自动连接
   pi.on("session_start", async (_event, ctx) => {
+    // 保存ctx供命令处理使用
+    globalCtx = ctx;
+    
     // 检查配置
     const clientId = process.env.DINGTALK_CLIENT_ID;
     const clientSecret = process.env.DINGTALK_CLIENT_SECRET;
@@ -212,13 +216,85 @@ export default function (pi: ExtensionAPI) {
   });
 
   // 设置消息回调（用于通知用户并自动处理）
-  messageCallback = (msg) => {
+  messageCallback = async (msg) => {
     // 保存当前消息的sessionWebhook
     currentSessionWebhook = msg.sessionWebhook;
     
-    // 发送用户消息，触发LLM自动处理和回复
+    // 使用正则解析：判断是否是斜杠命令
+    const trimmedText = msg.text.trim();
+    const commandMatch = trimmedText.match(/^\/(\w+)(?:\s+(.*))?$/);
+    
+    if (commandMatch) {
+      // 斜杠命令：直接执行，不经过LLM
+      const command = commandMatch[1].toLowerCase();
+      const args = commandMatch[2]?.trim() || "";
+      await handleCommand(pi, command, args, currentSessionWebhook);
+      return;
+    }
+    
+    // 普通消息：发送给LLM处理和回复
     pi.sendUserMessage(`[钉钉消息] ${msg.senderNick}: ${msg.text}`);
   };
+
+  // 命令处理函数（直接执行，不经过LLM）
+  async function handleCommand(api: ExtensionAPI, command: string, args: string, webhook: string) {
+    let replyText = "";
+    
+    switch (command) {
+      case "model":
+        if (args) {
+          // 解析 provider/model 格式
+          const modelMatch = args.match(/^(.+?)\/(.+)$/);
+          if (modelMatch) {
+            const provider = modelMatch[1];
+            const modelId = modelMatch[2];
+            const model = globalCtx?.modelRegistry?.find(provider, modelId);
+            if (model) {
+              const success = await api.setModel(model);
+              replyText = success 
+                ? `✅ 已切换到模型: ${provider}/${modelId}`
+                : `❌ 切换失败：找不到该模型的 API Key`;
+            } else {
+              replyText = `❌ 未找到模型: ${provider}/${modelId}`;
+            }
+          } else {
+            replyText = `⚠️ 模型格式错误，请使用 provider/model-id 格式，例如：\n/model anthropic/claude-sonnet-4-5`;
+          }
+        } else {
+          const currentModel = globalCtx?.model;
+          replyText = currentModel 
+            ? `📋 当前模型: ${currentModel.provider}/${currentModel.id}\n\n切换模型请输入：/model provider/model-id` 
+            : `📋 未设置模型\n\n切换模型请输入：/model provider/model-id`;
+        }
+        break;
+        
+      case "status":
+      case "info":
+        const modelInfo = globalCtx?.model 
+          ? `${globalCtx.model.provider}/${globalCtx.model.id}` 
+          : "未设置";
+        replyText = `📊 状态信息\n- 模型: ${modelInfo}\n- 钉钉: ${isConnected ? "已连接" : "未连接"}`;
+        break;
+        
+      case "help":
+        replyText = `📖 可用命令:\n\n` +
+          `/model - 查看当前模型\n` +
+          `/model provider/model-id - 切换模型\n` +
+          `/status - 查看状态\n` +
+          `/help - 显示帮助\n\n` +
+          `其他消息会发送给 AI 处理。`;
+        break;
+        
+      default:
+        // 未知命令：可以发给LLM处理，或者提示用户
+        replyText = `❓ 未知命令: /${command}\n输入 /help 查看可用命令`;
+    }
+    
+    // 发送回复到钉钉
+    if (replyText) {
+      await sendToDingTalk(webhook, replyText);
+    }
+  }
 
   // 监听agent结束事件，自动发送回复到钉钉
   pi.on("agent_end", async (event, ctx) => {
