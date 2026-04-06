@@ -1,0 +1,9 @@
+{
+  "name": "pi-dingtalk-extension",
+  "version": "1.0.0",
+  "description": "钉钉机器人通信extension，让pi可以通过钉钉收发消息",
+  "main": "index.ts",
+  "dependencies": {
+    "dingtalk-stream": "^2.1.6-beta.1"
+  }
+}
